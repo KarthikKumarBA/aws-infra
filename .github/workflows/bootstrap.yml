@@ -1,0 +1,59 @@
+name: Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "status, create or destroy (state bucket + OIDC provider + Terraform CI role)"
+        type: choice
+        options: [status, create, destroy]
+        default: status
+      confirm:
+        description: 'For destroy, type "destroy"'
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: Bootstrap ${{ github.event.inputs.action }}
+    runs-on: ubuntu-24.04
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      GITHUB_OWNER: ${{ github.repository_owner }}
+      PROJECT: karthik-platform
+      INFRA_REPO: ${{ github.event.repository.name }}
+      CLUSTER_NAME: karthik-eks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # The bootstrap creates/deletes the OIDC role itself, so it uses the admin user's keys
+      - name: Configure AWS credentials (admin keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.BOOTSTRAP_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.BOOTSTRAP_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Destroy not confirmed
+        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm != 'destroy'
+        run: |
+          echo "::error::Type 'destroy' in the confirm field."
+          exit 1
+
+      - name: Run bootstrap
+        run: |
+          scripts/bootstrap.sh "${{ github.event.inputs.action }}" | tee bootstrap.log
+          {
+            echo "### Bootstrap ${{ github.event.inputs.action }}"
+            echo '```'
+            cat bootstrap.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

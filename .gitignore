@@ -5,10 +5,11 @@ tfplan
 crash.log
 crash.*.log
 .terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.backup
 
-# Bootstrap uses local state - keep it safe, but out of Git
-bootstrap/terraform.tfstate
-bootstrap/terraform.tfstate.backup
+# Bootstrap logs
+bootstrap.log
 
 # OS / IDE
 .DS_Store
