@@ -32,13 +32,13 @@ env:
 jobs:
   terraform:
     name: Terraform ${{ github.event.inputs.action || 'plan' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: eks
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
