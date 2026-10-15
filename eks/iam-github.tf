@@ -3,6 +3,18 @@ data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 }
 
+locals {
+  # GitHub OIDC "sub" claim, both formats:
+  #   classic: repo:OWNER/REPO:ref:refs/heads/main
+  #   new:     repo:OWNER@<owner-id>/REPO@<repo-id>:ref:refs/heads/main
+  app_repo_subjects = flatten([
+    for repo in var.app_repos : [
+      "repo:${var.github_owner}/${repo}:ref:refs/heads/main",
+      "repo:${var.github_owner}@*/${repo}@*:ref:refs/heads/main",
+    ]
+  ])
+}
+
 data "aws_iam_policy_document" "github_deploy_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -18,7 +30,7 @@ data "aws_iam_policy_document" "github_deploy_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for repo in var.app_repos : "repo:${var.github_owner}/${repo}:ref:refs/heads/main"]
+      values   = local.app_repo_subjects
     }
   }
 }

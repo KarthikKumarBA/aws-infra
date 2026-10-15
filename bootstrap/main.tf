@@ -28,6 +28,16 @@ data "aws_caller_identity" "current" {}
 
 locals {
   state_bucket = "${var.project}-tfstate-${data.aws_caller_identity.current.account_id}"
+
+  # GitHub OIDC "sub" claim, both formats:
+  #   classic: repo:OWNER/REPO:<context>
+  #   new:     repo:OWNER@<owner-id>/REPO@<repo-id>:<context>
+  infra_repo_subjects = flatten([
+    for context in ["ref:refs/heads/main", "pull_request"] : [
+      "repo:${var.github_owner}/${var.infra_repo}:${context}",
+      "repo:${var.github_owner}@*/${var.infra_repo}@*:${context}",
+    ]
+  ])
 }
 
 # ---------- Terraform state bucket ----------
@@ -83,10 +93,7 @@ data "aws_iam_policy_document" "terraform_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.github_owner}/${var.infra_repo}:ref:refs/heads/main",
-        "repo:${var.github_owner}/${var.infra_repo}:pull_request",
-      ]
+      values   = local.infra_repo_subjects
     }
   }
 }
