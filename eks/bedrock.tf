@@ -1,4 +1,4 @@
-# Optional: lets the RAG pod (service account northwind/northwind-rag) call Bedrock without keys
+# Optional: lets the RAG pod (service account <rag_namespace>/northwind-rag) call Bedrock without keys
 resource "aws_iam_policy" "bedrock" {
   count = var.enable_bedrock_irsa ? 1 : 0
   name  = "${var.cluster_name}-rag-bedrock"
@@ -29,7 +29,7 @@ module "bedrock_irsa" {
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["northwind:northwind-rag"]
+      namespace_service_accounts = ["${var.rag_namespace}:northwind-rag"]
     }
   }
 }

@@ -5,6 +5,7 @@ set -euo pipefail
 
 CLUSTER="${1:?cluster name}"
 REGION="${2:?region}"
+APP_NAMESPACES="ai-rag-chatbot ai-agent-platform"
 
 if ! aws eks describe-cluster --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1; then
   echo "Cluster $CLUSTER not found - nothing to clean up."
@@ -14,7 +15,7 @@ fi
 aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" >/dev/null
 
 echo "==> Uninstalling application Helm releases"
-for ns in northwind ai-agent sample-app; do
+for ns in $APP_NAMESPACES; do
   for release in $(helm list -n "$ns" -q 2>/dev/null); do
     echo "    helm uninstall $release -n $ns"
     helm uninstall "$release" -n "$ns" --wait --timeout 5m || true

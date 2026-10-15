@@ -16,7 +16,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "Pick one in STANDARD support: aws eks describe-cluster-versions --region <region>"
   type        = string
-  default     = "1.34"
+  default     = "1.36"
 }
 
 variable "vpc_cidr" {
@@ -31,13 +31,13 @@ variable "az_count" {
 
 variable "node_instance_types" {
   type    = list(string)
-  default = ["t3.medium", "t3a.medium"]
+  default = ["m7i-flex.large"]
 }
 
 variable "node_capacity_type" {
-  description = "SPOT is about 70% cheaper for labs; use ON_DEMAND for stable workloads"
+  description = "ON_DEMAND (AWS Free plan allows only Free-Tier types on-demand) or SPOT"
   type        = string
-  default     = "SPOT"
+  default     = "ON_DEMAND"
 }
 
 variable "node_min_size" {
@@ -47,12 +47,12 @@ variable "node_min_size" {
 
 variable "node_max_size" {
   type    = number
-  default = 3
+  default = 2
 }
 
 variable "node_desired_size" {
   type    = number
-  default = 2
+  default = 1
 }
 
 variable "api_public_cidrs" {
@@ -78,9 +78,15 @@ variable "app_repos" {
 }
 
 variable "app_namespaces" {
-  description = "Namespaces created for the apps; the deploy role is admin only inside these"
+  description = "One namespace per application repo; the deploy role is admin only inside these"
   type        = list(string)
-  default     = ["northwind", "ai-agent", "sample-app"]
+  default     = ["ai-agent-platform", "ai-rag-chatbot"]
+}
+
+variable "rag_namespace" {
+  description = "Namespace of the RAG assistant (used for the Bedrock IRSA role)"
+  type        = string
+  default     = "ai-rag-chatbot"
 }
 
 variable "ecr_repositories" {
