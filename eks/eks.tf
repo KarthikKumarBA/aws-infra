@@ -5,6 +5,8 @@ data "aws_iam_session_context" "current" {
 }
 
 locals {
+  deployer_group = "github-deployers"
+
   # Whoever runs Terraform already gets admin via enable_cluster_creator_admin_permissions
   extra_admins = setsubtract(toset(var.cluster_admin_arns), [data.aws_iam_session_context.current.issuer_arn])
 
@@ -20,10 +22,13 @@ locals {
     }
   }
 
-  # GitHub deploy role: admin only inside the app namespaces
+  # GitHub deploy role: admin only inside the app namespaces.
+  # The Kubernetes group gets native RBAC (rbac.tf) so the role can create Roles/RoleBindings
+  # (Kubernetes only lets you grant permissions you hold through RBAC itself).
   deploy_entry = {
     github-deploy = {
-      principal_arn = aws_iam_role.github_deploy.arn
+      principal_arn     = aws_iam_role.github_deploy.arn
+      kubernetes_groups = [local.deployer_group]
       policy_associations = {
         apps = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
