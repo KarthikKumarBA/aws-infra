@@ -1,7 +1,7 @@
 # aws-infra - EKS runbook for ai-agent-platform and ai-rag-chatbot
 
 This repository creates the **shared AWS infrastructure** that both application repositories deploy into.
-This document is the **single, ordered guide** for the whole EKS lifecycle - from an empty AWS account to running apps, and back to an empty account - **run from the GitHub web UI**.
+This document is the **single, ordered guide** for the whole EKS lifecycle - from an empty AWS account to running apps, and back to an empty account - **run from the GitHub web UI** or with **one command** from Git Bash.
 
 | Documentation | Where |
 |---|---|
@@ -68,7 +68,7 @@ This document is the **single, ordered guide** for the whole EKS lifecycle - fro
 | ALB (wiki) | $0.03 / hour |
 | EBS gp3 volumes (15 GiB) | a few cents / day |
 | **While the cluster exists** | **about $0.20 / hour (~$5 / day)** |
-| Bootstrap only (S3 bucket + IAM) | almost free |
+| After a full teardown | **$0** - nothing is left in the account |
 
 > Tear down when you finish testing - [section 11](#11-tear-down-everything-exact-order).
 
@@ -91,7 +91,7 @@ Every step in this guide uses the same clicks:
 8. Wait until the run shows a green **✓** (a red **✗** means it failed - click the failed job to see the error).
 9. Scroll down to the run **Summary** - it shows the plan, the outputs or the app URL.
 
-> A workflow appears in the left list only while its file is on the `main` branch. Prefer the terminal? Every step also shows the matching `gh workflow run ...` command.
+> A workflow appears in the left list only while its file is on the `main` branch.
 
 ---
 
@@ -111,17 +111,19 @@ Every step in this guide uses the same clicks:
 | aws-infra | **Bootstrap** | `destroy` | `destroy` | Deletes state bucket (all versions), OIDC provider, Terraform role | 1 min |
 | both app repos | **CI** | automatic on push | - | Tests, image builds, smoke tests (no AWS) | 3-5 min |
 
-**Bring everything up:**
+**Bring everything up** - UI order, or one command `scripts/gh-up.sh` ([section 12](#12-next-time-bring-it-back)):
 
 ```
-Bootstrap apply → Terraform plan → Terraform apply → CD deploy (ai-rag-chatbot) → CD deploy (ai-agent-platform)
+Bootstrap apply → Terraform apply → CD deploy (ai-rag-chatbot) → CD deploy (ai-agent-platform)
 ```
 
-**Tear everything down:**
+**Tear everything down** - UI order, or one command `scripts/gh-down.sh` ([section 11](#11-tear-down-everything-exact-order)):
 
 ```
 CD uninstall (ai-rag-chatbot) → CD uninstall (ai-agent-platform) → Terraform destroy → Bootstrap destroy
 ```
+
+Both scripts trigger the same GitHub workflows, wait for each one, and **stop at the first failure** (printing the failed log).
 
 ---
 
@@ -186,11 +188,27 @@ aws eks describe-cluster-versions --region ap-south-1 \
   --query "clusterVersions[?versionStatus=='STANDARD_SUPPORT'].clusterVersion" --output text
 ```
 
+### 5.5 Scripts must be executable in Git
+
+Files committed from Windows lose the executable bit, and GitHub runners then fail with `Permission denied` (exit 126). Check once (and after adding any new script):
+
+```bash
+git ls-files -s scripts/
+```
+
+✅ Every line starts with `100755`. If one shows `100644`:
+
+```bash
+git update-index --chmod=+x scripts/*.sh
+git commit -m "Make scripts executable"
+git push origin main
+```
+
 ---
 
 ## 6. GitHub settings (once)
 
-All values are derived from the account ID, so they stay valid every time you destroy and recreate the infrastructure.
+All values are derived from the account ID, so they stay valid every time you destroy and recreate the infrastructure. **Variables and secrets survive a full teardown.**
 
 ### 6.1 aws-infra - variables
 
@@ -310,11 +328,13 @@ node_max_size       = 2
 
 ## 7. Bring up: bootstrap and cluster
 
+> Want it all in one go? Use `scripts/gh-up.sh` ([section 12](#12-next-time-bring-it-back)). The steps below are the same thing, one at a time.
+
 ### 7.1 Bootstrap plan
 
 **UI:** aws-infra → **Actions** → **Bootstrap** → **Run workflow** → action **`plan`** → **Run workflow**.
 
-✅ Summary shows the bootstrap plan. On the first run: `No saved state - importing existing resources`, and the plan only **updates** existing resources (tags, trust policy) - **0 to add, 0 to destroy**.
+✅ Summary shows the bootstrap plan. If the resources already exist and no state is saved: `No saved state - importing existing resources` and **0 to add, 0 to destroy**.
 
 **CLI:** `gh workflow run bootstrap.yml -f action=plan --repo KarthikKumarBA/aws-infra`
 
@@ -397,9 +417,10 @@ kubectl get pods,pvc,ingress -n ai-rag-chatbot
 
 ```bash
 kubectl get pods -n ai-agent-platform
+helm get manifest ai-agent-platform -n ai-agent-platform | grep -c "failureThreshold: 9"
 ```
 
-✅ `ai-agent` and `sample-app` `1/1 Running`.
+✅ `ai-agent` and `sample-app` `1/1 Running`, and `1` (sample-app liveness 9 × 10 s from the chart).
 
 ---
 
@@ -469,9 +490,11 @@ curl -s -o /dev/null -w "No token: %{http_code}\n" http://127.0.0.1:8090/inciden
 
 | # | Scenario | Commands | ✅ Expected |
 |---|---|---|---|
-| A | Unhealthy → restart (watcher) | `curl -s -X POST http://127.0.0.1:8081/simulate-failure; echo` → `sleep 50` → `curl -s -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` → `approve_latest` | `"source": "watcher"`, `restart_deployment`; after approve `"executed": true`, `"healthy": true` |
-| B | Memory leak → investigate | Restart window 1 → `curl -s -m 5 -X POST http://127.0.0.1:8081/simulate-memory-leak; echo` → `kubectl get pods -n ai-agent-platform -w` until `RESTARTS 1` → Ctrl+C → `curl -s -X POST -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` | `last_termination_reason OOMKilled`, `"recommended_action": "investigate"`, reason `2` |
-| C | Bad release → rollback | `kubectl set env deployment/sample-app -n ai-agent-platform CRASH_ON_STARTUP=true` → `sleep 60` → `curl -s -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` → `approve_latest` | Pod `CrashLoopBackOff`, `"action": "rollback"`, reason `3`; after approve `from_revision N` → `to_revision N-1`, `CRASH_ON_STARTUP` removed |
+| A | Unhealthy → restart (watcher) | `curl -s -X POST http://127.0.0.1:8081/simulate-failure; echo` → `sleep 50` → `curl -s -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` → `approve_latest` | `"source": "watcher"`, `restart_deployment` (rule 6); after approve `"executed": true`, `"healthy": true` |
+| B | Memory leak → investigate | Restart window 1 → `curl -s -m 5 -X POST http://127.0.0.1:8081/simulate-memory-leak; echo` → `kubectl get pods -n ai-agent-platform -w` until `RESTARTS 1` → Ctrl+C → `curl -s -X POST -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` | `OOMKilled`, `"recommended_action": "investigate"` (rule 2) |
+| C | Bad release → rollback | `kubectl set env deployment/sample-app -n ai-agent-platform CRASH_ON_STARTUP=true` → `sleep 60` → `curl -s -H "$AUTH" http://127.0.0.1:8090/incidents \| python -m json.tool` → `approve_latest` | Pod `CrashLoopBackOff`, `"action": "rollback"` (rule 3); after approve `from_revision N` → `to_revision N-1`, `CRASH_ON_STARTUP` removed |
+
+> After scenario B the pod keeps `last_termination_reason: OOMKilled`, so a failure right after it gives `investigate` (rule 2 comes first). Run `simulate-recovery`, wait 2 minutes, or start from a fresh pod before scenario A.
 
 Check least privilege and the audit log:
 
@@ -496,6 +519,8 @@ MSYS_NO_PATHCONV=1 kubectl exec -n ai-agent-platform deploy/ai-agent -- tail -n 
 | Infrastructure | Edit `eks/*.tf` or `eks/terraform.tfvars` → push → **Terraform** `plan` → check the summary → **Terraform** `apply` |
 | Bootstrap | Edit `bootstrap/*.tf` → push → **Bootstrap** `plan` → **Bootstrap** `apply` |
 
+> A manual `kubectl patch` / `kubectl set env` is undone by the next CD deploy - put permanent changes in the Helm chart. Check what Helm deployed with `helm history <release> -n <namespace>`.
+
 Images are tagged with the Git commit SHA:
 
 ```bash
@@ -507,30 +532,44 @@ kubectl get deploy -n ai-agent-platform -o custom-columns=NAME:.metadata.name,IM
 
 ## 11. Tear down everything (exact order)
 
-Wait for each run to finish with a green ✓ before starting the next.
-
-| Step | Repo | Workflow | action | confirm | Removes |
-|---|---|---|---|---|---|
-| 1 | ai-rag-chatbot | **CD** | `uninstall` | - | Wiki, RAG, ALB, EBS volumes |
-| 2 | ai-agent-platform | **CD** | `uninstall` | - | Agent, sample app |
-| 3 | aws-infra | **Terraform** | `destroy` | `destroy` | EKS, VPC, NAT, ECR, IAM roles |
-| 4 | aws-infra | **Bootstrap** | `destroy` | `destroy` | State bucket (all versions), OIDC provider, Terraform role |
-
-**CLI** (run one at a time; wait with `gh run watch --repo KarthikKumarBA/<repo>` in between):
+### 11.1 One command (recommended)
 
 ```bash
-gh workflow run cd.yml -f action=uninstall --repo KarthikKumarBA/ai-rag-chatbot
-gh workflow run cd.yml -f action=uninstall --repo KarthikKumarBA/ai-agent-platform
-gh workflow run terraform.yml -f action=destroy -f confirm=destroy --repo KarthikKumarBA/aws-infra
-gh workflow run bootstrap.yml -f action=destroy -f confirm=destroy --repo KarthikKumarBA/aws-infra
+cd "/d/AI Projects/aws-infra"
+export AWS_PROFILE=admin
+scripts/gh-down.sh
 ```
+
+✅ Four `Result: success` lines, seven lines of `[]` (nothing billable left) and `==> Teardown complete`. About 20 minutes.
+
+It runs, waiting for each one and **stopping at the first failure** (printing the failed log):
+
+| Step | Repo | Workflow | action | Removes |
+|---|---|---|---|---|
+| 1 | ai-rag-chatbot | **CD** | `uninstall` | Wiki, RAG, ALB, EBS volumes |
+| 2 | ai-agent-platform | **CD** | `uninstall` | Agent, sample app |
+| 3 | aws-infra | **Terraform** | `destroy` (confirm `destroy`) | EKS, VPC, NAT, Elastic IP, ECR, IAM roles |
+| 4 | aws-infra | **Bootstrap** | `destroy` (confirm `destroy`) | State bucket (all versions), OIDC provider, Terraform role |
+
+If it stopped at step 3 or 4, fix the cause ([section 14](#14-troubleshooting)) and continue without uninstalling the apps again:
+
+```bash
+scripts/gh-down.sh --infra
+```
+
+### 11.2 From the GitHub UI
+
+Same four steps, one at a time, waiting for a green ✓ before the next: **ai-rag-chatbot CD `uninstall`** → **ai-agent-platform CD `uninstall`** → **aws-infra Terraform `destroy`** (confirm `destroy`) → **aws-infra Bootstrap `destroy`** (confirm `destroy`).
 
 Built-in safety:
 
 - **Terraform destroy** first runs `scripts/pre-destroy.sh`, which removes Helm releases, Ingresses and load balancers so the VPC can be deleted.
-- **Bootstrap destroy** refuses to run while the EKS cluster exists (the state bucket is needed until Terraform has destroyed everything).
+- **Bootstrap destroy** refuses to run while the EKS cluster exists (Terraform needs the state bucket until it has destroyed everything).
+- **Never** run Bootstrap destroy after a failed Terraform destroy - fix Terraform first.
 
-### 11.1 Verify nothing billable is left
+### 11.3 Verify nothing billable is left
+
+(`scripts/gh-down.sh` already does this.)
 
 ```bash
 export AWS_PROFILE=admin
@@ -545,30 +584,49 @@ aws s3 ls | grep karthik-platform-tfstate || echo "[] state bucket deleted"
 
 ✅ Every command prints `[]`.
 
-### 11.2 Optional: remove the admin keys
+### 11.4 Optional: remove the admin keys
 
-Only when you are completely done (you will need new keys to bring it back):
+Only when you are done with AWS for a while (you will need a new key to bring it back):
 
-1. aws-infra → **Settings** → **Secrets and variables** → **Actions** → delete `BOOTSTRAP_AWS_ACCESS_KEY_ID` and `BOOTSTRAP_AWS_SECRET_ACCESS_KEY`.
-2. AWS console → **IAM** → **Users** → `terraform-admin` → **Security credentials** → **Actions → Deactivate**, then **Delete** the access key.
+1. AWS console → **IAM** → **Users** → `terraform-admin` → **Security credentials** → access key → **Deactivate** → **Delete**.
+2. Remove the GitHub secrets:
+
+```bash
+gh secret delete BOOTSTRAP_AWS_ACCESS_KEY_ID --repo KarthikKumarBA/aws-infra
+gh secret delete BOOTSTRAP_AWS_SECRET_ACCESS_KEY --repo KarthikKumarBA/aws-infra
+```
 
 ---
 
 ## 12. Next time: bring it back
 
-All GitHub variables and secrets from section 6 are kept. Run from the UI, in order:
+All GitHub variables and secrets from section 6 are kept.
 
-| Step | Repo | Workflow | action |
-|---|---|---|---|
-| 1 | aws-infra | **Bootstrap** | `apply` |
-| 2 | aws-infra | **Terraform** | `apply` |
-| 3 | ai-rag-chatbot | **CD** | `deploy` |
-| 4 | ai-agent-platform | **CD** | `deploy` |
+### 12.1 One command (recommended)
 
-Then `aws eks update-kubeconfig --name karthik-eks --region ap-south-1`.
+```bash
+cd "/d/AI Projects/aws-infra"
+export AWS_PROFILE=admin
+scripts/gh-up.sh
+```
 
-- Your IP changed? Update `ALLOWED_CIDR` (6.3) before step 3.
-- You deleted the admin keys (11.2)? Create a new access key and repeat 6.2 first.
+It updates `ALLOWED_CIDR` to your current IP, then runs, stopping at the first failure:
+
+| Step | Repo | Workflow | action | Time |
+|---|---|---|---|---|
+| 1 | aws-infra | **Bootstrap** | `apply` | 1 min |
+| 2 | aws-infra | **Terraform** | `apply` | 20 min |
+| 3 | ai-rag-chatbot | **CD** | `deploy` | 10 min |
+| 4 | ai-agent-platform | **CD** | `deploy` | 6 min |
+
+✅ Four `Result: success` lines, then the node and all 4 pods `Running`, `==> Wiki: http://k8s-sharedap-...` and `==> Everything is up`. About 35-40 minutes.
+
+### 12.2 From the GitHub UI
+
+**Bootstrap `apply`** → **Terraform `apply`** → **ai-rag-chatbot CD `deploy`** → **ai-agent-platform CD `deploy`**, waiting for ✓ each time. Then `aws eks update-kubeconfig --name karthik-eks --region ap-south-1`.
+
+- Your IP changed? Update `ALLOWED_CIDR` (6.3) before the ai-rag-chatbot deploy (`gh-up.sh` does it for you).
+- You deleted the admin keys (11.4)? Create a new access key and repeat 6.2 first.
 
 ---
 
@@ -583,7 +641,7 @@ Every **Bootstrap** run:
 
 1. **Restores** the state from the newest non-expired `bootstrap-tfstate` artifact.
 2. If none exists (first run, or older than 90 days), **imports** the existing bucket, OIDC provider and role (`scripts/bootstrap-import.sh`) - nothing is created twice.
-3. After `apply` or `destroy`, **saves** the new state as a fresh artifact.
+3. After `apply` or `destroy`, **saves** the new state as a fresh artifact (after a destroy it is empty, so the next `apply` creates everything from scratch).
 
 That is why the state bucket can be deleted at the end: the bootstrap stack never stores its own state in it.
 
@@ -593,12 +651,20 @@ To see the saved state: aws-infra → **Actions** → **Bootstrap** → newest `
 
 ## 14. Troubleshooting
 
+See the error of the latest failed run of a workflow:
+
+```bash
+gh run view $(gh run list --repo KarthikKumarBA/aws-infra --workflow terraform.yml --limit 1 --json databaseId --jq '.[0].databaseId') --repo KarthikKumarBA/aws-infra --log-failed | tail -n 60
+```
+
 | Symptom | Cause | Fix |
 |---|---|---|
-| **Bootstrap** not in the left list, or it shows old options `status/create/destroy` | New workflow file not pushed to `main` | `git ls-tree --name-only origin/main .github/workflows/`; push `bootstrap.yml` |
+| `scripts/...sh: Permission denied`, exit code 126 | Script committed from Windows without the executable bit | Section 5.5 (`git update-index --chmod=+x scripts/*.sh`), push, run again (`scripts/gh-down.sh --infra` for a teardown) |
+| `$'\r': command not found` in a script | Windows line endings | `.gitattributes` forces LF; `git add --renormalize . && git commit -m "LF" && git push` |
+| **Bootstrap** not in the left list, or old options `status/create/destroy` | New workflow file not on `main` | `git ls-tree --name-only origin/main .github/workflows/`; push `bootstrap.yml` |
 | Bootstrap: `InvalidClientTokenId` / `Unable to locate credentials` | `BOOTSTRAP_*` secrets missing or key deleted | Section 6.2 (new access key if needed) |
 | Bootstrap import: `not found ... Terraform will create it` for an existing resource | Name differs from `karthik-platform-*` | Check the name in the AWS console; adjust `project` in `bootstrap/terraform.tfvars` |
-| Bootstrap destroy: `EKS cluster karthik-eks still exists` | Terraform destroy not done | Terraform `destroy` first |
+| Bootstrap destroy: `EKS cluster karthik-eks still exists` | Terraform destroy not done or failed | Fix and finish Terraform destroy first |
 | Bootstrap destroy: `DeleteConflict` on the role | Policies attached outside Terraform | `force_detach_policies = true` handles it; re-run destroy |
 | Terraform: `Could not assume role with OIDC` | Terraform role missing | Bootstrap `apply` |
 | Terraform init: `S3 bucket does not exist` | Bootstrap not applied | Bootstrap `apply` |
@@ -612,10 +678,11 @@ To see the saved state: aws-infra → **Actions** → **Bootstrap** → newest `
 | Ingress has no ADDRESS | Load Balancer Controller | `kubectl describe ingress northwind-wiki -n ai-rag-chatbot`; `kubectl logs -n kube-system deploy/aws-load-balancer-controller --tail=50` |
 | RAG pod `Pending` | Volume in another AZ than the node, or node full | `kubectl describe pod -n ai-rag-chatbot -l app.kubernetes.io/name=rag`; set `node_desired_size = 2` |
 | Agent: empty response from `:8081` | Stale port-forward after a pod replacement | Restart window 1's port-forward |
-| Agent: no watcher incident, pod restarted on its own | Liveness probe restarted the pod before the 30 s watcher threshold | Chart uses liveness 9 × 10 s; CD `deploy` the latest chart |
+| Agent: no watcher incident, pod restarted on its own | Liveness probe faster than the watcher | Chart uses liveness 9 × 10 s; CD `deploy` the latest chart (`helm history` shows a new revision) |
+| Agent: `investigate` instead of `restart_deployment` | Pod still has `OOMKilled` from the memory-leak test (rule 2 first) | `simulate-recovery`, wait 2 minutes, trigger again |
 | `bash: syntax error near unexpected token newline` | `<id>` pasted literally | Use the `approve_latest` helper (9.2) |
 | `tail: cannot open 'C:/Program Files/Git/app/...'` | Git Bash path conversion | Prefix with `MSYS_NO_PATHCONV=1` |
-| Terraform destroy fails on VPC / subnet / security group | Leftover load balancer or ENI | `export AWS_PROFILE=admin && scripts/pre-destroy.sh karthik-eks ap-south-1`; delete leftovers in the EC2 console; re-run destroy |
+| Terraform destroy fails on VPC / subnet / security group | Leftover load balancer or ENI | `export AWS_PROFILE=admin && scripts/pre-destroy.sh karthik-eks ap-south-1`; delete leftovers in the EC2 console; `scripts/gh-down.sh --infra` |
 | `gh: please run gh auth login` | GitHub CLI not logged in | `gh auth login` |
 
 ---
@@ -653,8 +720,12 @@ aws-infra/
 │   ├── versions.tf providers.tf variables.tf terraform.tfvars
 │   ├── vpc.tf eks.tf addons.tf rbac.tf ecr.tf iam-github.tf bedrock.tf outputs.tf
 ├── scripts/
+│   ├── gh-up.sh                      # one command: Bootstrap apply -> Terraform apply -> both CD deploys
+│   ├── gh-down.sh                    # one command: both CD uninstalls -> Terraform destroy -> Bootstrap destroy
+│   ├── lib-gh.sh                     # run_and_wait helper used by both
 │   ├── bootstrap-import.sh           # adopts existing bootstrap resources when no state is saved
 │   └── pre-destroy.sh                # removes load balancers before Terraform destroy
+├── .gitattributes                    # *.sh with LF line endings
 └── .github/workflows/
     ├── bootstrap.yml                 # plan / apply / destroy
     └── terraform.yml                 # plan / apply / destroy

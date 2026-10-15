@@ -1,2 +1,2 @@
-* text=auto eol=lf
-*.ps1 text eol=crlf
+# Shell scripts must keep Linux line endings to run on GitHub runners
+*.sh text eol=lf
