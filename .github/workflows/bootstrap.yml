@@ -1,13 +1,16 @@
 name: Bootstrap
 
+# Manages: S3 state bucket, GitHub OIDC provider, Terraform CI role.
+# State: GitHub Actions artifact "bootstrap-tfstate" (restored before, saved after every apply/destroy).
+
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "status, create or destroy (state bucket + OIDC provider + Terraform CI role)"
+        description: "plan, apply or destroy"
         type: choice
-        options: [status, create, destroy]
-        default: status
+        options: [plan, apply, destroy]
+        default: plan
       confirm:
         description: 'For destroy, type "destroy"'
         type: string
@@ -15,24 +18,42 @@ on:
 
 permissions:
   contents: read
+  actions: read   # download the state artifact from earlier runs
 
 concurrency:
   group: bootstrap
   cancel-in-progress: false
 
+env:
+  TF_IN_AUTOMATION: "true"
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_VAR_region: ${{ vars.AWS_REGION }}
+  TF_VAR_github_owner: ${{ github.repository_owner }}
+  TF_VAR_infra_repo: ${{ github.event.repository.name }}
+  CLUSTER_NAME: karthik-eks
+
 jobs:
   bootstrap:
     name: Bootstrap ${{ github.event.inputs.action }}
     runs-on: ubuntu-24.04
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      GITHUB_OWNER: ${{ github.repository_owner }}
-      PROJECT: karthik-platform
-      INFRA_REPO: ${{ github.event.repository.name }}
-      CLUSTER_NAME: karthik-eks
+    defaults:
+      run:
+        working-directory: bootstrap
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Destroy not confirmed
+        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm != 'destroy'
+        run: |
+          echo "::error::Type 'destroy' in the confirm field."
+          exit 1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
 
       # The bootstrap creates/deletes the OIDC role itself, so it uses the admin user's keys
       - name: Configure AWS credentials (admin keys)
@@ -42,18 +63,83 @@ jobs:
           aws-secret-access-key: ${{ secrets.BOOTSTRAP_AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Destroy not confirmed
-        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm != 'destroy'
+      - name: Refuse destroy while the EKS cluster exists
+        if: github.event.inputs.action == 'destroy'
         run: |
-          echo "::error::Type 'destroy' in the confirm field."
-          exit 1
+          if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "::error::EKS cluster $CLUSTER_NAME still exists. Run the Terraform workflow with action=destroy first."
+            exit 1
+          fi
 
-      - name: Run bootstrap
+      - name: Restore state from the latest artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/bootstrap.sh "${{ github.event.inputs.action }}" | tee bootstrap.log
+          RUN_ID=""
+          for id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow bootstrap.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                 --jq '.artifacts[] | select(.name == "bootstrap-tfstate" and .expired == false) | .id' | grep -q .; then
+              RUN_ID="$id"; break
+            fi
+          done
+          if [ -n "$RUN_ID" ]; then
+            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n bootstrap-tfstate -D .
+            echo "Restored state from run $RUN_ID"
+            echo "### State restored from run $RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No saved state found - existing resources will be imported"
+            echo "### No saved state - importing existing resources" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Import existing resources (only when no state was restored)
+        run: |
+          if [ ! -s terraform.tfstate ]; then
+            ../scripts/bootstrap-import.sh
+          else
+            echo "State present - import not needed"
+          fi
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        run: |
+          terraform plan -input=false -out=tfplan
           {
-            echo "### Bootstrap ${{ github.event.inputs.action }}"
+            echo "### Bootstrap plan"
             echo '```'
-            cat bootstrap.log
+            terraform show -no-color tfplan | tail -n 40
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply
+        if: github.event.inputs.action == 'apply'
+        run: |
+          terraform apply -input=false tfplan
+          {
+            echo "### Bootstrap outputs"
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy (empties and deletes the state bucket, then OIDC provider and role)
+        if: github.event.inputs.action == 'destroy' && github.event.inputs.confirm == 'destroy'
+        run: |
+          # First allow the bucket to be deleted with all object versions, then destroy everything
+          terraform apply -input=false -auto-approve -var allow_state_bucket_destroy=true
+          terraform destroy -input=false -auto-approve -var allow_state_bucket_destroy=true
+          echo "### Bootstrap destroyed - state bucket, OIDC provider and Terraform role removed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save state as artifact
+        if: (github.event.inputs.action == 'apply' || github.event.inputs.action == 'destroy') && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-tfstate
+          path: bootstrap/terraform.tfstate
+          retention-days: 90
+          if-no-files-found: warn

@@ -5,11 +5,11 @@ tfplan
 crash.log
 crash.*.log
 .terraform.tfstate.lock.info
-*.tfstate
-*.tfstate.backup
 
-# Bootstrap logs
-bootstrap.log
+# Bootstrap state lives in a GitHub Actions artifact, never in Git
+bootstrap/terraform.tfstate
+bootstrap/terraform.tfstate.backup
+bootstrap/*.tfstate*
 
 # OS / IDE
 .DS_Store
